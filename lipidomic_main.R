@@ -935,9 +935,8 @@ lipidnames <- colnames(regoutdat)
 regoutdat$Label <- grouplabels
 regoutdat <- regoutdat[c('Label', lipidnames)]
 
-
-
-#Limma#####
+#Limma confounder adjustment#####
+#Limma##
 wogestwk <- FALSE
 
 finalvarstmp <- finalvars
@@ -947,6 +946,9 @@ if(wogestwk == TRUE){
   finalvars <- finalvars[finalvars != 'GestationalAgeWeeks']
   
 }
+
+
+#finalvars <- colnames(pd)
 
 
 clusterstr <- 'Preeclampsia to Control'
@@ -980,7 +982,8 @@ limmapvals$compound <- row.names(limmapvals)
 row.names(limmapvals) <- 1:nrow(limmapvals)
 limmapvals <- limmapvals[c('compound')]
 
-#Heatmap#######
+
+#Heatmap###
 
 drawheatmap <- function(datamat = newdat, title = 'Metabolites', whetherrowname = FALSE, 
                         clustermethod = 'average', 
@@ -1085,6 +1088,288 @@ drawheatmap2 <- function(datamat = newdat, title = 'Metabolites', whetherrowname
 }
 
 drawheatmap2(clusternum = 5)
+
+#Compare confounder limma results###
+
+limmadatlist <- list()
+limmametlist <- list()
+i <- 1
+for(i in 1:(ncol(design) - 1)){
+  
+  idx <- i + 1
+  finalvar <- colnames(design)[idx]
+  
+  topmet <- topTable(fit2, coef = idx, n = nrow(fit2))
+  topmet <- row.names(topmet[topmet$P.Value < 0.01,])
+  
+  if(length(topmet) > 0){
+    topdat <- newdat[,c('Label', topmet)]
+  }else{
+    topdat <- newdat[,c('Label'), drop = FALSE]
+  }
+  
+  
+  limmadatlist[[finalvar]] <- topdat
+  limmametlist[[finalvar]] <- topmet
+  
+}
+
+otherlimmamets <- c()
+for(i in 2:length(limmametlist)){
+  otherlimmamets <- c(otherlimmamets, limmametlist[[i]])
+  
+  
+}
+
+otherlimmamets <- unique(otherlimmamets)
+
+
+
+intersectlipids <- intersect(limmametlist$Sample_GroupPreeclampsia, otherlimmamets)
+
+library(VennDiagram)
+library(gridExtra)
+grid.newpage()
+venn.plot <- draw.pairwise.venn(length(limmametlist$Sample_Group), length(otherlimmamets), 
+                                length(intersectlipids), c('Pree', 'Confounders'), 
+                                col=c('red', 'cyan'), fill=c('red', 'cyan'), 
+                                alpha=c(.4, .4))
+grid.arrange(gTree(children = venn.plot), 
+             top = paste("Differential lipid overlap between preeclampsia and confounders
+                         \n(Age, BMI, Chronic Hypertension, Ethgroup, Gestational Age, Membrane Rupture, Neonatal Malformations)"))
+
+
+topmet <- limmametlist$Sample_GroupPreeclampsia
+topdat <- limmadatlist$Sample_GroupPreeclampsia[,c('Label', topmet)]
+
+realtopmet <- setdiff(topmet, otherlimmamets)
+realtopdat <- topdat[,c('Label', realtopmet)]
+
+
+drawheatmap(datamat = topdat, title = 'Preeclmapsia top metabolites', whetherrowname = TRUE, 
+            clustermethod = 'complete', fontsizerow = 10, whetherclustergroup = FALSE)
+
+drawheatmap(datamat = realtopdat, title = 'Preeclmapsia top metabolites (Filtered)', 
+            whetherrowname = TRUE, clustermethod = 'complete', fontsizerow = 10, 
+            whetherclustergroup = FALSE)
+
+
+#Remove gestational daibetes and smokers##
+
+removevars <- c('Gestational_Diabetes', 'Smoker')
+
+i <- 2
+
+
+
+removemetlist <- list()
+removedatlist <- list()
+
+for(i in 1:length(removevars)){
+  removevar <- removevars[i]
+  removepd <- pd[pd[,removevar] == 'N',]
+  idx <- pd[,removevar] == 'N'
+  
+  if(i == 1){
+    idces <- idx
+  }else{
+    idces <- idces & idx
+  }
+  
+  
+  design <- model.matrix(formulastr, data = removepd)
+  
+  removenormfirst <- newdat[-1]
+  removenormfirst <- removenormfirst[row.names(removepd),]
+  removenormfirst <- t(removenormfirst)
+  
+  
+  fit1 <- lmFit(removenormfirst, design)
+  fit2 <- eBayes(fit1)
+  
+  head(topTable(fit2, coef = 2, n = nrow(fit2)))
+  
+  removetopmet <- topTable(fit2, coef = 2, n = nrow(fit2))
+  removetopmet <- row.names(removetopmet[removetopmet$P.Value < 0.01,])
+  removetopdat <- newdat[,c('Label', topmet)]
+  
+  removemetlist[[removevar]] <- removetopmet
+  removedatlist[[removevar]] <- removetopdat
+  
+}
+
+
+removepd <- pd[idces,]
+removepd <- removepd[-match(c('Smoker', 'Gestational_Diabetes'), colnames(removepd))]
+
+design <- model.matrix(formulastr, data = removepd)
+
+removenormfirst <- newdat[-1]
+removenormfirst <- removenormfirst[row.names(removepd),]
+removenormfirst <- t(removenormfirst)
+
+#Remove data SOV###
+
+removesovdat <- as.data.frame(t(removenormfirst))
+
+removeFtab <- data.frame(Sample_Group = numeric(), stringsAsFactors = FALSE)
+for(i in 2:ncol(removepd)){
+  varname <- names(removepd)[i]
+  removeFtab[varname] <- numeric()
+}
+
+
+removecalF <- function(probe = removesovdat[,1]){
+  library(car)
+  
+  newdata <- removepd
+  pdnames <- names(newdata)
+  newdata$beta <- probe
+  
+  formstr <- paste0(pdnames, collapse = ' + ')
+  formstr <- paste0('beta ~ ', formstr)
+  formstr <- as.formula(formstr)
+  
+  fit <- lm(formstr, data = newdata)
+  
+  aovfit <- Anova(fit, type = 3, singular.ok = TRUE)
+  
+  
+  F <- aovfit$`F value`
+  
+  F <- F[2:(length(F)-1)]
+  names(F) <- pdnames
+  F <- as.data.frame(F, stringsAsFactors = FALSE)
+  F <- as.data.frame(t(F))
+  row.names(F) <- 1
+  
+  
+  removeFtab <- rbind(removeFtab, F)
+  
+  return(removeFtab)
+}
+
+
+
+removeFtab <- mclapply(X = removesovdat, FUN = removecalF, mc.cores = 1)
+
+removeFtab <- do.call(rbind, removeFtab)
+
+
+removeFmean <- colMeans(removeFtab)
+
+removeFmean <- removeFmean[order(-removeFmean)]
+
+removeFmean <- data.frame(Factor = names(removeFmean), Fstat = as.vector(removeFmean), stringsAsFactors = FALSE)
+
+finalvars <- unique(c('Sample_Group', removeFmean$Factor[removeFmean$Fstat > 1]))
+
+
+
+removeFmean$Factor <- c('Preeclampsia', 'Age', 'GestationalAgeWeeks', 'Ethgroup', 'NeonatalMalformations', 
+                        'MembraneRupture', 'Parity', 'BMI', 'Gender', 'ChronicHypertension', 
+                        'PlacentalAbruption')
+
+
+sovplot(restab = removeFmean, plottype = 'F', textsize = 15)
+
+
+
+formulastr <- paste0('~ ', paste0(finalvars, collapse = '+'))
+formulastr <- formula(formulastr)
+
+design <- model.matrix(formulastr, data = removepd)
+
+fit1 <- lmFit(removenormfirst, design)
+fit2 <- eBayes(fit1)
+
+head(topTable(fit2, coef = 2, n = nrow(fit2)))
+
+
+
+limmadatlist <- list()
+limmametlist <- list()
+i <- 1
+for(i in 1:(ncol(design) - 1)){
+  
+  idx <- i + 1
+  finalvar <- colnames(design)[idx]
+  
+  topmet <- topTable(fit2, coef = idx, n = nrow(fit2))
+  topmet <- row.names(topmet[topmet$P.Value < 0.01,])
+  
+  if(length(topmet) > 0){
+    topdat <- newdat[,c('Label', topmet)]
+  }else{
+    topdat <- newdat[,c('Label'), drop = FALSE]
+  }
+  
+  
+  limmadatlist[[finalvar]] <- topdat
+  limmametlist[[finalvar]] <- topmet
+  
+}
+
+otherlimmamets <- c()
+for(i in 2:length(limmametlist)){
+  otherlimmamets <- c(otherlimmamets, limmametlist[[i]])
+  
+  
+}
+
+otherlimmamets <- unique(otherlimmamets)
+
+intersectlipids <- intersect(limmametlist$Sample_GroupPreeclampsia, otherlimmamets)
+
+library(VennDiagram)
+library(gridExtra)
+grid.newpage()
+venn.plot <- draw.pairwise.venn(length(limmametlist$Sample_Group), length(otherlimmamets), 
+                                length(intersectlipids), c('Pree', 'Confounders'), 
+                                col=c('red', 'cyan'), fill=c('red', 'cyan'), 
+                                alpha=c(.4, .4))
+grid.arrange(gTree(children = venn.plot), 
+             top = paste("Differential lipid overlap between preeclampsia and confounders"))
+
+
+topmet <- limmametlist$Sample_GroupPreeclampsia
+topdat <- limmadatlist$Sample_GroupPreeclampsia[,c('Label', topmet)]
+
+smallrealtopmet <- setdiff(topmet, otherlimmamets)
+smallrealtopdat <- topdat[,c('Label', smallrealtopmet)]
+
+
+
+
+drawheatmap(datamat = smallrealtopdat, title = 'Preeclmapsia top metabolites (Subset Filtered)', 
+            whetherrowname = TRUE, clustermethod = 'complete', fontsizerow = 10, 
+            whetherclustergroup = FALSE)
+
+
+
+#Smallest dataset#
+
+smallset <- intersect(realtopmet, smallrealtopmet)
+
+
+
+library(VennDiagram)
+library(gridExtra)
+grid.newpage()
+venn.plot <- draw.pairwise.venn(length(realtopmet), length(smallrealtopmet), 
+                                length(smallset), c('Complete', 'Screened'), 
+                                col=c('red', 'cyan'), fill=c('red', 'cyan'), 
+                                alpha=c(.4, .4))
+grid.arrange(gTree(children = venn.plot), 
+             top = paste("Final differential lipids"))
+
+
+
+smallsetdat <- limmadatlist$Sample_Group[,c('Label', smallset)]
+
+drawheatmap(datamat = smallsetdat, title = 'Preeclmapsia top metabolites', 
+            whetherrowname = TRUE, clustermethod = 'complete', fontsizerow = 10, 
+            whetherclustergroup = FALSE)
 
 #Wilcox comparision######
 
